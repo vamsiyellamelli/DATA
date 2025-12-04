@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+status_to_html_simple.py
+
+Single-file script:
+ - parses a plain text health/status dump
+ - groups by environment (robust detection)
+ - produces an HTML report with 2 tiles per row
+ - shows filesystem usage or "All FS under threshold"
+ - collapsible full services details
+ - overview badge color:
+     * green  => all services running
+     * orange => 1..3 services not running
+     * red    => >3 services not running
+ - no "(N servers)" text in env header (requested)
+"""
+
+import re
+import sys
+from html import escape
+from datetime import datetime
+
+# ----------------------------
+# Configurable known environment tokens
+# ----------------------------
+KNOWN_ENVS = ["PT", "KEYSTONE", "SIT1", "SIT2", "MIG1", "MIG2", "OAT", "ETL", "CCI", "IDC", "LOADER", "NPC"]
+
+# ----------------------------
+# Helper functions
+# ----------------------------
+def detect_env_from_host(hostname):
+    if not hostname:
+        return "GLOBAL"
+    h = hostname.upper()
+    for token in KNOWN_ENVS:
+        if token.upper() in h:
+            return token.upper()
+    first = re.split(r"[-\.]", hostname)[0]
+    first = first.strip()
+    return first.upper() if first else "GLOBAL"
+
+
+def parse_group_by_env(lines):
+    """
+    Parse lines to produce:
+      env_map = { ENV_NAME: [ server_dict, ... ] }
+    server_dict:
+      {
+        "ip":ip,
+        "host": host_token,
+        "env": env,
+        "files": [(name, pct), ...],
+        "services": [(svc_name, status), ...],
+        "raw_services": [orig line strings]
+      }
+    """
+    env_map = {}
+    current = None
+
+    re_header = re.compile(r"Status of services on\s+([\d\.]+)(?:/([A-Za-z0-9\-_]+))?", re.I)
+    re_fs = re.compile(r"(\d{1,3})%\s+(\S+)")
+    re_svc = re.compile(r"([A-Za-z0-9_\-\.]+)\s+is\s+(Running|Stopped|Failed|Up|Down|Active|Inactive|Unknown)", re.I)
+
+    for raw in lines:
+        ln = raw.rstrip("\n")
+        s = ln.strip()
+        if not s:
+            continue
+
+        # header line
+        mh = re_header.search(s)
+        if mh:
+            ip = mh.group(1)
+            host_token = mh.group(2) if mh.group(2) else ip
+            env = detect_env_from_host(host_token)
+            current = {"ip": ip, "host": host_token, "env": env, "files": [], "services": [], "raw_services": []}
+            env_map.setdefault(env, []).append(current)
+            continue
+
+        # filesystem lines
+        mfs = re_fs.search(s)
+        if mfs and current is not None:
+            try:
+                pct = int(mfs.group(1))
+            except:
+                pct = None
+            name = mfs.group(2)
+            current["files"].append((name, pct))
+            continue
+
+        # service lines
+        msvc = re_svc.search(s)
+        if msvc and current is not None:
+            svc_name = msvc.group(1)
+            status = msvc.group(2).capitalize()
+            current["services"].append((svc_name, status))
+            current["raw_services"].append(s)
+            continue
+
+        # else ignore / or could store other text if needed
+
+    return env_map
+
+
+# ----------------------------
+# HTML generator
+# ----------------------------
+def make_html(title, env_map):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html = f"""<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>{escape(title)}</title>
+<style>
+body{{font-family:Arial,Helvetica,sans-serif;background:#f4f5f7;margin:0;padding:20px;color:#222}}
+.container{{max-width:1300px;margin:0 auto}}
+.banner{{background:#2e8b57;color:white;padding:12px 18px;border-radius:6px;font-size:18px;margin-bottom:20px}}
+.section{{margin-bottom:40px}}
+.section h2{{margin:8px 0}}
+
+
+
+
+
+
+
+
+
+
+
+
+
+.grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}}
+@media(max-width:900px){{ .grid{{grid-template-columns:1fr}} }}
+.card{{background:white;border-radius:8px;border:1px solid #ddd;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.08)}}
+
+.meta{{font-size:13px;color:#555;margin-bottom:10px}}
+.files-table{{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}}
+.files-table th, .files-table td{{padding:6px;border-bottom:1px solid #eee}}
+.files-table th{{text-align:left;color:#333}}
+
+#done
+
+
+
+
+ 
+
+
+.progress{{width:180px;height:10px;background:#eee;border-radius:8px;overflow:hidden;display:inline-block;vertical-align:middle}}
+.progress-bar{{height:100%;background:#e74c3c;display:block}}
+
+
+.badge{{padding:6px 12px;border-radius:14px;font-size:12px;font-weight:700;color:white;display:inline-block}}
+.badge.green{{background:#2ecc71}}       /* all good */
+
+.badge.orange{{background:#f39c12}}      /* 1..3 services down */
+.badge.red{{background:#d9534f}}         /* >3 services down */
+.badge.running{{background:#2ecc71}}     /* individual svc running */
+
+
+
+
+
+
+
+.badge.stopped{{background:#f39c12}}     /* individual svc stopped */
+.badge.failed{{background:#d9534f}}      /* individual svc failed */
+
+
+
+.expand-btn{{float:right;color:#444;font-size:12px;cursor:pointer;text-decoration:underline}}
+
+
+
+.collapsible{{display:none;background:#fafafa;border:1px dashed #ccc;padding:8px;margin-top:8px;border-radius:6px;font-size:12px}}
+.svc-row{{display:flex;justify-content:space-between;margin:6px 0;padding:6px;border-radius:4px;background:#fff}}
+.small-muted{{color:#777;font-size:12px}}
+.legend{{margin-top:10px;font-size:13px;color:#444}}
+
+
+
+
+
+
+
+
+
+.legend .sw{{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:middle;border-radius:3px}}
+.sw.green{{background:#2ecc71}}
+.sw.orange{{background:#f39c12}}
+.sw.red{{background:#d9534f}}
+</style>
+<script>
+function toggleDetails(id) {{
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.style.display = (el.style.display === "block") ? "none" : "block";
+}}
+
+
+
+
+</script>
+</head>
+<body>
+<div class="container">
+  <div class="banner">{escape(title)} &nbsp; <small>Reported: {now}</small></div>
+  <div class="legend">
+    Legend:&nbsp;
+    <span class="sw green"></span> All services running &nbsp;&nbsp;
+    <span class="sw orange"></span> 1-3 services down &nbsp;&nbsp;
+    <span class="sw red"></span> &gt;3 services down
+  </div>
+"""
+    
+
+
+
+
+
+
+    # iterate environments in sorted order (case-insensitive)
+    for env in sorted(env_map.keys(), key=lambda x: x.lower()):
+        servers = env_map[env]
+        html += f"<div class='section'><h2>{escape(env)}</h2>"
+        html += "<div class='grid'>"
+
+        for idx, srv in enumerate(servers):
+            card_id = f"svc_{env}_{idx}"
+            # compute service summary counts
+            not_running_count = 0
+
+
+
+
+            for (_name, status) in srv["services"]:
+                if "run" not in status.lower():
+                    not_running_count += 1
+
+
+
+
+
+
+
+            # determine badge class by rules
+            if not_running_count == 0:
+                overview_cls = "green"
+                overview_label = "All Running"
+            elif 1 <= not_running_count <= 3:
+                overview_cls = "orange"
+                overview_label = f"{not_running_count} down"
+            else:
+                overview_cls = "red"
+                overview_label = f"{not_running_count} down"
+
+            html += "<div class='card'>"
+            html += f"<div class='meta'><b>{escape(srv['host'])}</b><br><span class='small-muted'>IP: {escape(srv['ip'])}</span></div>"
+
+            # Filesystems
+            html += "<b>Filesystems</b><br>"
+            if not srv["files"]:
+                html += "<div class='small-muted'>All FS under threshold</div>"
+            else:
+                html += "<table class='files-table'><tr><th>Name</th><th>Usage</th></tr>"
+                for name, pct in srv["files"]:
+                    pct_label = f"{pct}%" if pct is not None else "N/A"
+                    width_pct = f"{pct}%" if pct is not None else "0%"
+                    html += f"""
+<tr>
+  <td>{escape(name)}</td>
+  <td>{pct_label} &nbsp;
+    <div class="progress"><span class="progress-bar" style="width:{width_pct}"></span></div>
+  </td>
+</tr>"""
+                html += "</table>"
+
+
+
+
+
+
+
+
+
+
+
+
+
+            # Services summary & collapsible details
+            html += f"""
+<br><b>Services</b>
+<span class="expand-btn" onclick="toggleDetails('{card_id}')">click to view complete status</span><br>
+<div style="margin-top:8px;">
+  <span class="badge {overview_cls}">{escape(overview_label)}</span>
+</div>
+
+<div id="{card_id}" class="collapsible">
+"""
+            
+
+
+            if not srv["services"]:
+                html += "<div class='small-muted'>No services lines found</div>"
+            else:
+                for svc_name, status in srv["services"]:
+                    st = status.lower()
+                    if "run" in st:
+                        cls = "running"
+                    elif "fail" in st:
+                        cls = "failed"
+                    else:
+                        cls = "stopped"
+                    # show service and its status (no PID)
+                    html += f"<div class='svc-row'><span>{escape(svc_name)}</span><span class='badge {cls}'>{escape(status)}</span></div>"
+
+            html += "</div>"  # end collapsible
+            html += "</div>"  # end card
+
+        html += "</div></div>"  # end grid + section
+
+    html += "</div></body></html>"
+    return html
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python status_to_html_simple.py input.txt output.html")
+        return
+
+    infile = sys.argv[1]
+    outfile = sys.argv[2]
+
+    with open(infile, "r", errors="ignore") as fh:
+        lines = fh.readlines()
+
+    env_map = parse_group_by_env(lines)
+    html = make_html("Environment health check report", env_map)
+
+    with open(outfile, "w", encoding="utf-8") as fo:
+        fo.write(html)
+
+    print("HTML report generated:", outfile)
+
+
+if __name__ == "__main__":
+    main()
